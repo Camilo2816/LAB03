@@ -111,8 +111,76 @@ Se configuran las máscaras de descriptores:
 - Con `select`, cuando el **socket de escucha** está “listo para lectura”, significa que **hay una conexión establecida** en la cola; cuando un **socket de cliente** está “listo para lectura”, significa **datos disponibles** o **cierre del peer**.  
 - Estas estructuras permiten al broker **multiplexar** muchas conexiones TCP en un solo hilo.
 
+### 4 Bucle principal del broker
+### 4.1 Bucle principal: “esperar y atender” con `select()`
+
+<img width="478" height="191" alt="image" src="https://github.com/user-attachments/assets/e9159304-758b-43b8-845f-2ef971bed650" />
+
+**Qué hace este bloque:**  
+- Entra a un bucle infinito y **se queda esperando** hasta que ocurra algo en cualquiera de los sockets (nueva conexión o datos de un cliente).
+- Cuando algo pasa, **sabe exactamente en qué socket fue** y lo atiende.
+
+**Piezas clave:**
+
+- `readfds = master`  
+  Hacemos una **copia** del conjunto de sockets que estamos vigilando. `select()` modifica esa copia, por eso no usamos `master` directo.
+
+- `ready = select(fdmax + 1, &readfds, NULL, NULL, NULL)`  
+  `select()` **bloquea** el programa hasta que haya actividad de **lectura** en al menos un socket.  
+  - Si vuelve con un número `ready > 0`, significa “hay `ready` sockets con algo para leer”.
+
+- `for (fd = 0; fd <= fdmax && ready > 0; fd++) { … }`  
+  Recorremos todos los descriptores **y solo procesamos** los que `select()` marcó como “listos”.
+
+- `FD_ISSET(fd, &readfds)`  
+  Pregunta: **¿este socket tiene algo?**  
+  - Si **sí** y es el **socket de escucha**, significa **nueva conexión** pendiente → la atenderemos con `accept()`.  
+  - Si **sí** y es un **socket de cliente**, significa **datos recibidos** o que el cliente **cerró** → lo leeremos con `recv()`.
+
+**Que hace `select()` aquí:**  
+Nos permite **vigilar muchos sockets a la vez** en un solo hilo: el broker **no se bloquea** esperando a un cliente en particular; **reacciona** al que tenga actividad.
+
+
+### 4.2 Cuando `select()` señala al *listener*: aceptar una nueva conexión (`accept()`)
+
+<img width="548" height="459" alt="image" src="https://github.com/user-attachments/assets/9ab5ec5a-9971-45cf-b53a-47fdb480e6a3" />
+
+**Qué pasa aquí:**  
+Si el descriptor “listo” es el **socket de escucha**, significa que hay un cliente que terminó el **handshake TCP** y está esperando ser atendido.  
+El broker llama a `accept()` para **extraer** esa conexión de la cola y obtener un **nuevo socket** exclusivo para ese cliente.
+
+**Pasos del bloque:**
+
+- `accept(listener, …)`  
+  Crea un **socket de cliente** (`cfd`) distinto del `listener`.  
+  - Si falla, se registra el error y se continúa (no detiene el servidor).
+
+- `inet_ntop(...)` + `ntohs(cli.sin_port)`  
+  Convierte la IP y el puerto del cliente a texto para el log.  
+  (Útil para depurar y ver quién se conectó).
+
+- Buscar hueco en las tablas de estado  
+  Recorre `clients[]` para encontrar una posición libre (`-1`):
+  - `clients[i] = cfd` → guarda el **fd** del cliente.  
+  - `roles[i] = UNKNOWN` → aún no sabemos si será **PUB** o **SUB**.  
+  - `topics[i][0] = '\0'` → sin topic asignado por ahora.  
+  - `FD_SET(cfd, &master)` → añade el nuevo socket al conjunto vigilado por `select()`.  
+  - `fdmax = max(fdmax, cfd)` → actualiza el mayor fd para futuras llamadas a `select()`.
+
+- Sin espacio disponible  
+  Si no hay lugares libres en `clients[]`, se **cierra** el socket (`close(cfd)`) y se informa “capacidad llena”.
+
+**Idea clave:**  
+- El *listener* solo **recibe** conexiones.  
+- Cada cliente real trabaja con **su propio socket (cfd)**.  
+- Al agregar `cfd` a `master`, el broker podrá detectar **datos** de ese cliente en iteraciones futuras de `select()`.
+
+**Cómo encaja con TCP:**  
+- `accept()` se llama **después** del handshake (SYN → SYN/ACK → ACK).  
+- A partir de aquí, el cliente y el broker tienen un **canal dedicado** para intercambiar mensajes de aplicación.
 
 
 
+<img width="526" height="327" alt="image" src="https://github.com/user-attachments/assets/8b485977-897e-44c2-826d-88d60fcfe133" />
 
 
