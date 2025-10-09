@@ -179,8 +179,107 @@ El broker llama a `accept()` para **extraer** esa conexión de la cola y obtener
 - `accept()` se llama **después** del handshake (SYN → SYN/ACK → ACK).  
 - A partir de aquí, el cliente y el broker tienen un **canal dedicado** para intercambiar mensajes de aplicación.
 
-
+### 4.3 Recepción de datos o cierre de conexión (`recv()`)
 
 <img width="526" height="327" alt="image" src="https://github.com/user-attachments/assets/8b485977-897e-44c2-826d-88d60fcfe133" />
 
+**Qué pasa en este bloque:**  
+Si el descriptor “listo” **no es el listener**, significa que un cliente existente (PUB o SUB) ha enviado datos o ha cerrado su conexión.  
+Aquí el broker usa `recv()` para **leer** los datos o detectar un cierre.
 
+**Explicación paso a paso:**
+
+- `recv(fd, buf, sizeof(buf) - 1, 0)`  
+  Intenta leer datos del socket del cliente y los guarda en `buf`.  
+  - Si devuelve un número positivo → se recibieron bytes.  
+  - Si devuelve `0` → el cliente **cerró la conexión**.  
+  - Si devuelve negativo → ocurrió un **error** en la lectura.
+
+- Si `n <= 0`  
+  El cliente ya **no está disponible**.  
+  - Se imprime el mensaje de desconexión.  
+  - Se elimina el socket del conjunto `master` con `FD_CLR(fd, &master)`.  
+  - Se cierra el descriptor con `close(fd)` para liberar recursos.
+
+- Limpieza del registro del cliente  
+  Se busca el índice correspondiente en `clients[]` y se reinician sus valores:
+  - `clients[i] = -1` → marca la posición como libre.  
+  - `roles[i] = UNKNOWN` → borra su rol previo.  
+  - `topics[i][0] = '\0'` → borra su topic suscrito.
+
+**Comportamiento TCP que refleja:**  
+- Cuando el cliente termina su conexión, TCP realiza el cierre con el intercambio **FIN / ACK**, y `recv()` devuelve `0`.  
+- Este bloque maneja correctamente ese evento, manteniendo actualizado el estado del broker y dejando espacio libre para nuevos clientes.  
+
+### 4.4 Procesamiento de los datos recibidos (`recv()` completo)
+
+<img width="528" height="314" alt="image" src="https://github.com/user-attachments/assets/78115a4e-d2c4-4f6c-8428-2fc21237d614" />
+
+**Qué hace este bloque:**  
+Cuando `recv()` devuelve datos, el broker debe analizarlos.  
+TCP entrega los mensajes como un flujo continuo, por lo que este bloque se encarga de **dividirlo en líneas completas** y procesarlas una a una.
+
+**Pasos del bloque:**
+
+- `buf[n] = '\0'`  
+  Se agrega el carácter nulo al final del texto recibido para poder tratarlo como una cadena.
+
+- **Identificación del cliente:**  
+  Se busca el índice correspondiente en `clients[]` para saber qué conexión envió el mensaje.  
+  Si no se encuentra, se registra una advertencia y se continúa (caso raro).
+
+- **Separación de líneas:**  
+  Se usa `strtok_r()` con el separador `"\r\n"` para dividir el texto recibido en múltiples líneas.  
+  Esto es importante porque en una misma llamada de `recv()` pueden llegar varios mensajes.
+
+- **Filtrado de líneas vacías:**  
+  Se ignoran las cadenas vacías para evitar procesar saltos de línea residuales.
+
+- **Impresión de mensajes recibidos:**  
+  Se muestra en consola el contenido de cada línea con su descriptor de cliente (`fd`).
+
+- **Identificación del tipo de mensaje:**  
+  - Si la línea es `"ROLE: PUB"`, el cliente se marca como **publicador** (`roles[idx] = PUB`) y se responde con un `ACK`.  
+  - Si la línea es `"ROLE: SUB"`, se marca como **suscriptor** (`roles[idx] = SUB`) y también se confirma con `ACK`.
+
+**Relación con el funcionamiento de TCP:**  
+TCP no garantiza que los mensajes lleguen en el mismo tamaño o agrupación con que se enviaron.  
+Por eso, este bloque “rearma” el contenido recibido en mensajes completos, línea a línea, permitiendo al broker **interpretar correctamente los comandos** enviados por cada cliente.
+
+**En resumen:**  
+Este código transforma el flujo TCP en **mensajes discretos** y clasifica a cada cliente según su rol (publicador o suscriptor), asegurando que el broker siempre entienda qué tipo de cliente se acaba de conectar.
+
+### 4.5 Procesamiento de comandos `SUB` y `PUB`
+
+<img width="461" height="479" alt="image" src="https://github.com/user-attachments/assets/8e764f8a-6e8d-4e0d-bdd2-48088d34f9a6" />
+
+Este bloque permite al broker interpretar y manejar los comandos enviados por los clientes, diferenciando entre suscriptores (SUB) y publicadores (PUB). Cada mensaje recibido se analiza y se actúa en consecuencia.
+
+#### Comando SUB: <topic>
+Cuando un cliente envía un mensaje que comienza con `SUB:`, el broker interpreta que desea suscribirse a un tema específico.  
+Mediante `strncmp(line, "SUB: ", 5)` se detecta el comando y con `snprintf(topics[idx], ...)` se guarda el nombre del topic en el que el cliente desea recibir mensajes.  
+Luego, el broker confirma la suscripción enviando un mensaje de respuesta `"SUBOK"` al cliente.
+
+Este proceso aprovecha la confiabilidad del protocolo TCP: los datos llegan completos y en el mismo orden en que fueron enviados, permitiendo registrar correctamente las suscripciones sin pérdidas ni duplicaciones.
+
+#### Comando PUB: <topic>|<mensaje>
+Cuando un cliente identificado como publicador envía un mensaje que comienza con `PUB:`, el broker lo procesa como una publicación.  
+Primero, el código separa el nombre del topic y el contenido del mensaje usando `strchr(payload, '|')`. El texto antes del separador representa el topic, y el texto después el mensaje.  
+Luego, se construye una cadena con el formato `"MSG: <topic> <mensaje>"`, que se reenviará a todos los suscriptores del mismo topic.
+
+El broker recorre la lista de clientes:
+- Verifica si el cliente está activo (`clients[i] > 0`),
+- Comprueba que su rol sea `SUB`,
+- Comprueba que el topic coincida (`strcmp(topics[i], topic) == 0`).
+
+A los clientes que cumplan estas condiciones se les envía el mensaje mediante `send()`. Finalmente, se imprime en consola cuántos suscriptores lo recibieron y se envía un `"ACK"` al publicador para confirmar que su publicación fue procesada.
+
+#### Relación con el funcionamiento de TCP
+El comportamiento de este bloque depende directamente de las características del protocolo TCP:
+- TCP garantiza **entrega confiable**, asegurando que todos los bytes del mensaje se reciban correctamente.
+- TCP mantiene el **orden** de los datos, lo que permite que las publicaciones lleguen a los suscriptores en la misma secuencia en que fueron enviadas.
+- TCP conserva una **conexión persistente**, de modo que los publicadores y suscriptores pueden enviar y recibir mensajes continuamente sin necesidad de reconectarse.
+
+En conjunto, estas propiedades permiten que el broker funcione como un sistema de mensajería estable y seguro, distribuyendo información en tiempo real sin pérdidas, duplicaciones ni desorden en las entregas.
+
+## Publisher (broker_tcp.c) – Diseño y funciones clave
