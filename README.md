@@ -282,4 +282,217 @@ El comportamiento de este bloque depende directamente de las características de
 
 En conjunto, estas propiedades permiten que el broker funcione como un sistema de mensajería estable y seguro, distribuyendo información en tiempo real sin pérdidas, duplicaciones ni desorden en las entregas.
 
-## Publisher (broker_tcp.c) – Diseño y funciones clave
+## Publisher (publisher_tcp.c) – Diseño y funciones clave
+
+### 1. Publisher – Funciones auxiliares
+
+<img width="401" height="298" alt="image" src="https://github.com/user-attachments/assets/f902e50b-379d-4910-b6c3-06c409a1693f" />
+
+#### `sanitize(char *s)`
+Normaliza el texto de un topic o nombre de equipo para que sea consistente al compararlo:
+- Recorre la cadena y reemplaza los espacios `' '` por guiones bajos `'_'`.
+- Elimina saltos de línea (`'\r'` o `'\n'`) cortando la cadena en ese punto (`'\0'`).
+Esto evita discrepancias al usar `strcmp()` entre lo que publica el publisher y lo que suscribe el subscriber.
+
+#### `send_line(int fd, const char *line)`
+Envía una línea de texto por el socket TCP y trata de leer una respuesta rápida:
+- Calcula el largo con `strlen` y usa `send(fd, line, L, 0)` para transmitir la línea completa.
+- Intenta leer un posible `ACK` del broker con `recv(fd, resp, ..., MSG_DONTWAIT)`.  
+  El flag `MSG_DONTWAIT` evita bloquearse si todavía no llegó la respuesta.
+- Si llega algo, se termina en `'\0'` para poder imprimirlo (opcional).
+
+Relación con TCP:
+- `send()` escribe en el flujo confiable de TCP; el sistema se encarga de segmentar, retransmitir y mantener el orden.
+- `recv(..., MSG_DONTWAIT)` refleja que la aplicación no necesita esperar bloqueada por la respuesta: TCP entregará los bytes tan pronto como estén disponibles.
+
+#### `rnd(int a, int b)`
+Genera un entero pseudoaleatorio en el rango `[a, b]`.  
+Se usa para simular eventos del partido (goles, tarjetas, etc.) con probabilidades controladas.
+
+### 2. Publisher – Bloque principal de inicialización (`main` - argumentos y configuración)
+
+<img width="637" height="288" alt="image" src="https://github.com/user-attachments/assets/46a46bb7-c98d-467d-aeaa-8477654b4ecf" />
+
+Este bloque configura los parámetros iniciales del publicador a partir de los argumentos de ejecución que el usuario pasa por consola.  
+El programa se invoca con la siguiente estructura:
+
+./publisher_tcp <ip_broker> <puerto> "EquipoA" "EquipoB" [duracion_min=90] [ms_por_min=300]
+
+
+**Validación de argumentos:**  
+Si el número de argumentos es menor a 5, el programa muestra el formato correcto de uso y termina con `EXIT_FAILURE`.  
+Esto evita que se ejecute sin la información mínima requerida.
+
+**Asignación de variables básicas:**
+- `ip` y `port` definen la dirección y el puerto del broker TCP.  
+- `teamA` y `teamB` guardan los nombres de los dos equipos del partido.  
+- `duration` indica cuántos minutos simulará el juego (por defecto 90).  
+- `ms_per_min` define el tiempo en milisegundos que dura un “minuto” simulado (por defecto 300 ms).
+
+**Creación del topic:**
+Se genera un nombre de topic con el formato `"EquipoA_vs_EquipoB"`.  
+Antes, se normalizan los nombres de los equipos con `sanitize()`, que reemplaza espacios por guiones bajos y elimina saltos de línea, garantizando que el topic no contenga caracteres problemáticos.  
+El nombre se crea con `snprintf(topic, sizeof(topic), "%s_vs_%s", teamA, teamB)`.
+
+**Relación con TCP:**
+En este punto todavía no se ha abierto la conexión, pero toda esta configuración prepara los datos que luego se enviarán al broker mediante un socket TCP.  
+Esta inicialización es importante porque define el *contexto lógico* de la sesión: una sola conexión TCP se usará para publicar todos los eventos relacionados con este partido (topic).
+
+
+### 3. Publisher – Conexión TCP y envío inicial
+
+<img width="435" height="324" alt="image" src="https://github.com/user-attachments/assets/323769d5-669c-4e5e-870f-2d8c2720764e" />
+
+Este bloque establece la conexión TCP con el broker y envía los primeros mensajes de identificación y estado.
+
+**Creación del socket TCP**
+Se crea un socket con `socket(AF_INET, SOCK_STREAM, 0)`.  
+- `AF_INET` indica que se usará la familia de direcciones IPv4.  
+- `SOCK_STREAM` define que la conexión será TCP (orientada a flujo y confiable).  
+Si la creación falla, se invoca `die("socket")` y el programa termina.
+
+**Configuración del destino (`struct sockaddr_in`)**
+Se prepara la estructura `srv` con los datos del broker:
+- `srv.sin_family = AF_INET` define que es una conexión IPv4.  
+- `srv.sin_port = htons(port)` convierte el puerto al formato de red (big-endian).  
+- `inet_pton(AF_INET, ip, &srv.sin_addr)` convierte la dirección IP de texto a formato binario.
+
+**Establecimiento de la conexión**
+`connect(fd, (struct sockaddr*)&srv, sizeof(srv))` inicia la conexión TCP con el broker.  
+Si es exitosa, se imprime un mensaje confirmando la conexión con la IP, puerto y el topic asignado.  
+En este punto, el *three-way handshake* de TCP ya se completó y la sesión está establecida.
+
+**Identificación del rol**
+El publicador envía su rol al broker con `send_line(fd, "ROLE: PUB\n")`.  
+Esto le indica al broker que esta conexión será usada para publicar mensajes y no para suscribirse.
+
+**Inicialización de la simulación**
+Se establece una semilla aleatoria con `srand((unsigned)time(NULL) ^ getpid())` para variar los eventos del partido.  
+Luego se envía el primer mensaje:
+```c
+snprintf(out, sizeof(out), "PUB: %s|Inicio del partido\n", topic);
+send_line(fd, out);
+```
+### 4. Publisher – Simulación del partido y envío de eventos
+
+<img width="541" height="470" alt="image" src="https://github.com/user-attachments/assets/46b3a4d5-64d7-49b9-8c4f-5bec083e6c4b" />
+
+Este bloque implementa el ciclo principal que simula el desarrollo del partido.  
+Mediante un bucle que avanza minuto a minuto, el publicador genera eventos aleatorios y los envía al broker a través de la conexión TCP establecida.
+
+En cada iteración del ciclo, se usa la función `rnd(a, b)` para decidir de forma aleatoria qué tipo de evento ocurre.  
+Entre los eventos posibles se incluyen goles, tarjetas amarillas, tarjetas rojas, cambios de jugador, tiros de esquina u otras situaciones del partido.  
+Cada evento se formatea en una cadena de texto con información sobre el minuto y el equipo correspondiente, y se envía con la función `send_line()`, que escribe el mensaje en el socket TCP.
+
+Gracias a este mecanismo, el broker recibe los eventos en tiempo real y los retransmite a todos los suscriptores interesados en el mismo topic.  
+El uso de TCP garantiza que todos los mensajes lleguen de manera confiable y en el mismo orden en que fueron generados, manteniendo la coherencia de la simulación.
+
+En resumen, este bloque transforma la simulación del juego en un flujo continuo de mensajes transmitidos por una conexión TCP persistente, asegurando una comunicación estable entre publicador, broker y suscriptores durante toda la duración del partido.
+
+### 5. Publisher – Cierre de la simulación y fin de la conexión
+
+<img width="541" height="124" alt="image" src="https://github.com/user-attachments/assets/4a09b66a-f03b-46b3-90c7-6837227ecfe0" />
+
+Al finalizar el ciclo de simulación, el publicador envía un último mensaje al broker con el resultado final del partido.  
+El mensaje se construye con `snprintf()` y se envía con `send_line()`, usando el formato:
+```
+PUB: <topic>|Final del partido – Resultado <EquipoA> <golesA> - <golesB> <EquipoB>
+```
+
+Esto permite que todos los suscriptores reciban el resumen final del encuentro antes de que la conexión se cierre.
+
+Después del envío, el socket se libera mediante `close(fd)`, finalizando la comunicación con el broker.  
+Por último, se imprime un mensaje local confirmando que el partido ha terminado y mostrando el marcador final.
+
+Este bloque refleja el cierre natural de una sesión TCP:  
+el publicador envía sus últimos datos, el broker los recibe, y luego la conexión se cierra de forma ordenada.  
+Gracias al protocolo TCP, el cierre asegura que todos los mensajes pendientes sean entregados antes de liberar los recursos.
+
+## Suscriber (suscriber_tcp.c) – Diseño y funciones clave
+
+### 1. Subscriber – Inicialización y conexión
+
+<img width="521" height="272" alt="image" src="https://github.com/user-attachments/assets/25b0f733-447b-409a-86dc-dfb6f8f79d2b" />
+
+Este bloque configura los parámetros básicos del suscriptor y establece la conexión TCP con el broker.
+
+**Validación de argumentos**
+El programa espera exactamente 4 argumentos:
+
+```
+./subscriber_tcp <ip_broker> <puerto> <partido>
+```
+
+Si no se cumplen, se imprime el formato correcto de uso y el programa finaliza.  
+Así se asegura que el suscriptor tenga la información mínima necesaria: adónde conectarse y a qué topic (partido) suscribirse.
+
+**Creación del socket TCP**
+`socket(AF_INET, SOCK_STREAM, 0)` crea un socket de tipo **TCP** (flujo confiable).  
+Si falla, el programa finaliza, ya que no podría comunicarse con el broker.
+
+**Configuración de la dirección del broker**
+Se completa una estructura `sockaddr_in`:
+- `sin_family = AF_INET` para IPv4,
+- `sin_port = htons(port)` convierte el puerto al formato de red,
+- `inet_pton(AF_INET, ip, &srv.sin_addr)` pasa la IP de texto a binario.
+
+**Establecimiento de la conexión**
+`connect(fd, (struct sockaddr*)&srv, sizeof(srv))` inicia la conexión con el broker.  
+Si es exitosa, el *three-way handshake* de TCP (SYN, SYN/ACK, ACK) ya se ha completado y el canal de comunicación queda listo para enviar/recibir datos.  
+Se imprime un mensaje indicando que el suscriptor está conectado a la IP y al puerto del broker.
+
+Esta fase refleja el uso típico de TCP en un cliente: crear socket, configurar la dirección remota y conectarse, obteniendo un flujo confiable por el que se intercambiarán los mensajes de control y los eventos publicados.
+
+### 2. Subscriber – Identificación y suscripción
+
+<img width="361" height="137" alt="image" src="https://github.com/user-attachments/assets/913efc7a-d8d5-495a-ac19-856a762728bd" />
+
+Después de establecer la conexión con el broker, el suscriptor debe identificarse y especificar el topic al que quiere recibir mensajes.
+
+**Envío del rol**
+Se construye un mensaje `"ROLE: SUB\n"` y se envía con `send(fd, role, strlen(role), 0)`.  
+Esto le indica al broker que esta conexión será utilizada para **recibir** publicaciones, no para enviarlas.  
+Si el envío falla, el programa se detiene, ya que sin este paso el broker no podrá clasificar correctamente la conexión.
+
+**Envío de la suscripción**
+Luego se genera otro mensaje con el formato `"SUB: <topic>\n"`, donde `<topic>` corresponde al partido o tema de interés.  
+Se usa `snprintf()` para construir la cadena y `send()` para transmitirla al broker.  
+Finalmente, se imprime en consola una confirmación de la suscripción.
+
+**Relación con el funcionamiento de TCP**
+Ambos mensajes se envían a través de la misma conexión TCP ya establecida.  
+TCP garantiza que:
+- Los bytes se entregan **en orden**, por lo que el broker siempre procesará primero el rol y luego la suscripción.
+- La entrega es **confiable**, asegurando que los comandos no se pierdan ni se corrompan.
+
+Gracias a esto, el broker puede mantener la sesión abierta y lista para enviar mensajes a este suscriptor cada vez que un publicador publique un evento en el topic correspondiente.
+
+### 3. Subscriber – Recepción de mensajes del broker
+
+<img width="383" height="155" alt="image" src="https://github.com/user-attachments/assets/b2a6535b-e959-4644-972b-765dd45f13f4" />
+
+En este bloque, el suscriptor entra en un bucle permanente donde espera mensajes provenientes del broker.  
+Una vez que la suscripción ha sido registrada, la conexión TCP se mantiene abierta para recibir cualquier publicación nueva que el broker reenvíe.
+
+**Recepción de datos**
+El comando `recv(fd, buf, sizeof(buf) - 1, 0)` lee los datos que llegan por el socket y los guarda en el búfer `buf`.  
+- Si devuelve un número positivo, significa que llegaron datos.  
+- Si devuelve `0`, la conexión fue cerrada por el broker.  
+- Si devuelve un valor negativo, ocurrió un error en la recepción.
+
+Al recibir datos válidos, se agrega el carácter nulo `'\0'` para terminar la cadena y poder imprimirla de forma legible en consola.  
+Luego se muestra en pantalla el mensaje recibido, que usualmente tendrá el formato:
+
+```
+[SUB] <- MSG: <topic> <mensaje>
+```
+
+**Cierre ordenado**
+Si `recv()` devuelve `0` o un error, el suscriptor sale del bucle, cierra el socket con `close(fd)` y termina el programa.
+
+**Relación con el comportamiento de TCP**
+- TCP mantiene una conexión **persistente** y **bidireccional**: el broker puede enviar mensajes en cualquier momento sin que el cliente deba solicitar cada uno.  
+- Los datos llegan **en orden y sin pérdidas**, garantizando que los eventos del publicador sean recibidos por los suscriptores en la misma secuencia en la que fueron emitidos.  
+- Cuando el broker cierra la conexión, el suscriptor lo detecta automáticamente porque `recv()` devuelve `0`.
+
+Este mecanismo permite que el suscriptor funcione como un receptor en tiempo real de todos los mensajes relacionados con el topic al que se unió.
