@@ -3,7 +3,7 @@ Documentación de la implementación en C de un sistema Publish/Subscribe sobre 
 Componentes: broker_udp.c, publisher_udp.c, subscriber_udp.c.
 
 ## Arquitectura general ##
-<img width="441" height="81" alt="image" src="https://github.com/user-attachments/assets/7bec76b4-a8db-44a3-bc54-dd266130f7c0" />
+
 
 - Broker: recibe datagramas PUB: <topic>|<mensaje> del publisher y los reenvía con formato MSG: <topic>|<mensaje> a todos los suscriptores registrados para ese <topic>.
 
