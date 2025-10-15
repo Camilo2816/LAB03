@@ -102,13 +102,107 @@ Detalles importantes del diseño:
 - Como UDP no garantiza entrega ni orden, el broker no reintenta ni reordena: solo reenvía lo que recib
 
 
-### 3. Publisher UDP — envío de N eventos
+### 3. Publisher UDP - Diseño y funciones clave
 
-<img width="814" height="654" alt="image" src="https://github.com/user-attachments/assets/cce537d5-36f2-43c5-a07f-ea79aa277d22" />
-El subscriber crea su socket UDP, arma la dirección del broker y envía una vez:
+1. Creación del socket y configuración de la dirección del broker
 
-Así, el broker registra su (IP:puerto) dentro del conjunto de ese <topic>.
+<img width="550" height="210" alt="image" src="https://github.com/user-attachments/assets/060cb0eb-6bb8-408f-acae-1ab2dc554cb7" />
 
-Luego queda en un bucle con recvfrom() esperando datagramas MSG:<topic>|<mensaje> y los imprime.
 
-Por qué es relevante: como UDP no garantiza orden/entrega, si la aplicación exige consistencia (p. ej., marcador siempre creciente) debe implementar número de secuencia o timestamp en el payload y aplicar solo si es más nuevo. Tu implementación base ya permite explicarlo, aunque no aplica reordenamiento (y está OK para el lab).
+En esta primera parte se crea un socket UDP con socket(AF_INET, SOCK_DGRAM, 0) y se configura la dirección del broker.
+El inet_pton() convierte la IP del broker (por ejemplo, 127.0.0.1) a formato binario.
+
+A diferencia del publisher TCP, aquí no se realiza connect() porque UDP no establece conexiones persistentes.
+Los mensajes se envían directamente con sendto() cada vez que sea necesario.
+
+2. Envío de mensajes simulados
+
+<img width="860" height="208" alt="image" src="https://github.com/user-attachments/assets/fb59a96c-52fb-4a1a-a6e5-c9b75cd30d37" />
+
+
+Este fragmento simula el envío de varios eventos de un partido.
+Cada evento es un datagrama independiente enviado con sendto().
+El formato PUB:<topic>|Evento UDP #i permite al broker reconocer el tema y reenviar el mensaje a los suscriptores correctos.
+
+Comportamiento UDP:
+- Los mensajes se envían sin confirmación.
+- Si uno se pierde, el publisher no se entera.
+- El retardo (usleep) facilita observar el flujo en Wireshark.
+
+
+
+
+
+
+
+
+### 3. Subscriber UDP - Diseño y funciones clave 
+
+<img width="612" height="398" alt="image" src="https://github.com/user-attachments/assets/d2a29835-11ee-4f8b-ae28-a3fd02122612" />
+
+En esta parte, el subscriber crea un socket UDP y envía un único datagrama al broker con el formato SUB:<topic>.
+De esta manera, el broker agrega su dirección (IP y puerto) a la lista de suscriptores del tema correspondiente.
+
+Comportamiento UDP:
+- No hay handshake ni confirmación: el broker simplemente asume que el mensaje fue recibido.
+- Este proceso es mucho más rápido que en TCP, pero también más vulnerable a pérdidas.
+
+2. Recepción de mensajes del broker
+
+<img width="630" height="205" alt="image" src="https://github.com/user-attachments/assets/a3875162-677d-4b93-ba75-99d64143a440" />
+
+Después de suscribirse, el subscriber entra en un bucle infinito escuchando mensajes MSG: reenviados por el broker.
+Cada datagrama recibido se imprime en consola, mostrando los eventos del partido o topic suscrito.
+
+Relación con UDP:
+- Cada recvfrom() recibe un datagrama completo (no parte de un flujo).
+- Si el broker envía varios mensajes seguidos, podrían llegar desordenados o perderse.
+- Para evitar inconsistencias, la aplicación podría agregar números de secuencia o timestamps.
+
+Ejemplo de salida esperada:
+
+<img width="593" height="50" alt="image" src="https://github.com/user-attachments/assets/eb401036-716a-45ee-83a2-ed28675340c1" />
+
+### Capturas Wireshark (UDP)
+1. Filtro y arranque de captura
+
+En Wireshark, selecciona la interfaz lo (loopback) y aplica el filtro:
+
+<img width="196" height="42" alt="image" src="https://github.com/user-attachments/assets/5e1afe89-d587-469c-9658-ec7dbf04e395" />
+
+Al iniciar el broker y los clientes, se observarán directamente los datagramas UDP, sin el clásico handshake de TCP.
+
+2. Suscripción (SUB:)
+
+El subscriber envía un único datagrama con:
+
+<img width="689" height="74" alt="image" src="https://github.com/user-attachments/assets/a3f4c224-f4ab-41f6-9d7d-12b8269a8e97" />
+
+En Wireshark se verá un solo paquete que viaja desde el SUB hacia el broker.
+
+El broker imprime en consola:
+
+<img width="703" height="93" alt="image" src="https://github.com/user-attachments/assets/5fddebe2-edd8-41a2-b210-0530025d9e9e" />
+
+3. Publicación y replicación
+
+Cuando el publisher envía:
+
+<img width="576" height="50" alt="image" src="https://github.com/user-attachments/assets/8b9931ac-f1f6-480b-9ac2-627dcb9931e2" />
+
+El broker genera:
+
+<img width="475" height="42" alt="image" src="https://github.com/user-attachments/assets/413beccb-e2cf-44e8-83bf-0ccad4b89583" />
+
+y lo reenvía a todos los suscriptores del mismo tema.
+
+En Wireshark se ven los datagramas PUB entrando al broker y los MSG saliendo hacia cada SUB, evidenciando el proceso de fan-out.
+
+
+### Conclusión general
+
+La implementación UDP demuestra un sistema ligero, rápido y sin conexión persistente, ideal para aplicaciones donde la baja latencia es más importante que la entrega confiable de cada mensaje, como transmisiones en vivo o notificaciones efímeras.
+
+Sin embargo, esta simplicidad tiene un costo: al no garantizar orden ni entrega, el protocolo requiere que la aplicación gestione por sí misma mecanismos de control, como numeración de mensajes, timestamps o reenvíos, si se desea mantener consistencia entre los suscriptores.
+
+Por otro lado, el enfoque TCP —implementado en la parte anterior del laboratorio— ofrece una comunicación más segura y ordenada, a costa de un mayor consumo de recursos y tiempos de establecimiento de conexión.
