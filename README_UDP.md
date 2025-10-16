@@ -7,7 +7,7 @@ Componentes: broker_udp.c, publisher_udp.c, subscriber_udp.c.
 
 - Broker: recibe datagramas PUB: <topic>|<mensaje> del publisher y los reenvía con formato MSG: <topic>|<mensaje> a todos los suscriptores registrados para ese <topic>.
 
-- Publisher: envía datagramas al broker con publicaciones para un <topic>.
+- Publisher: envía eventos del partido como PUB:<topic>|<mensaje>.
 
 -Subscriber: registra su interés con un datagrama SUB: <topic> y luego recibe datagramas MSG: que coincidan con ese <topic>.
 
@@ -44,9 +44,10 @@ gcc -Wall -O2 -o subscriber_udp subscriber_udp.c
 
 **4. Publishers (simulador de partido)**
 
-./publisher_udp 127.0.0.1 5001 Real_Azul_vs_Atletico_Rojo 10
+./publisher_udp 127.0.0.1 5001 "Real Azul" "Atletico Rojo" 20 150
 
-./publisher_udp 127.0.0.1 9000 Verde_CF_vs_Universidad_FC 10
+./publisher_udp 127.0.0.1 5001 "Verde_CF" "Universidad_FC" 20 150
+
 
 **Capturas en Wireshark (UDP)**
 
@@ -104,37 +105,31 @@ Detalles importantes del diseño:
 
 ### 3. Publisher UDP - Diseño y funciones clave
 
-1. Creación del socket y configuración de la dirección del broker
+1. Creación del socket y configuración del destino
 
-<img width="550" height="210" alt="image" src="https://github.com/user-attachments/assets/060cb0eb-6bb8-408f-acae-1ab2dc554cb7" />
-
-
-En esta primera parte se crea un socket UDP con socket(AF_INET, SOCK_DGRAM, 0) y se configura la dirección del broker.
-El inet_pton() convierte la IP del broker (por ejemplo, 127.0.0.1) a formato binario.
-
-A diferencia del publisher TCP, aquí no se realiza connect() porque UDP no establece conexiones persistentes.
-Los mensajes se envían directamente con sendto() cada vez que sea necesario.
-
-2. Envío de mensajes simulados
-
-<img width="860" height="208" alt="image" src="https://github.com/user-attachments/assets/fb59a96c-52fb-4a1a-a6e5-c9b75cd30d37" />
-
-
-Este fragmento simula el envío de varios eventos de un partido.
-Cada evento es un datagrama independiente enviado con sendto().
-El formato PUB:<topic>|Evento UDP #i permite al broker reconocer el tema y reenviar el mensaje a los suscriptores correctos.
-
-Comportamiento UDP:
-- Los mensajes se envían sin confirmación.
-- Si uno se pierde, el publisher no se entera.
-- El retardo (usleep) facilita observar el flujo en Wireshark.
+<img width="785" height="775" alt="image" src="https://github.com/user-attachments/assets/1560ba11-7127-479a-8148-dd9e82e8fae9" />
 
 
 
 
+En esta primera parte de define utilidades (die, sanitize, rnd), lees argumentos, construyes el topic con EquipoA_vs_EquipoB (espacios → _) y se crea el socket UDP con la dirección del broker (no hay connect()).
+
+2. Mensaje de inicio del partido
+
+<img width="584" height="113" alt="image" src="https://github.com/user-attachments/assets/714976a1-cefa-4d47-a520-fb70ab4a5ec2" />
 
 
+Este fragmento envía un primer datagrama con el arranque del encuentro, usando el formato PUB:<topic>|<mensaje> que el broker entiende para enrutar.
 
+3) Bucle de simulación minuto a minuto (eventos y parciales)
+
+<img width="746" height="916" alt="image" src="https://github.com/user-attachments/assets/72eee328-41b0-4f74-9e11-10b4449c316c" />
+En esta parte se genera eventos estocásticos (goles, tarjetas, faltas, corners, cambios) y los publica como datagramas independientes. En UDP no hay ACKs ni orden garantizado; los parciales cada 5’ ayudan a “reconstruir estado” si se perdió algo.
+
+4) Mensaje final y cierre
+
+<img width="586" height="108" alt="image" src="https://github.com/user-attachments/assets/0449e373-8eb5-4a46-b67f-3b6cb3790449" />
+Y finalizando se anuncia el resultado definitivo y cierra el socket. El subscriber verá el resumen final del encuentro.
 
 ### 3. Subscriber UDP - Diseño y funciones clave 
 
