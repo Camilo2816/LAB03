@@ -30,17 +30,17 @@ int main(int argc, char *argv[]) {
     if (connect(fd, (struct sockaddr*)&srv, sizeof(srv)) < 0) die("connect");
     printf("[SUB] Conectado a %s:%d\n", ip, port);
 
-    // 1️⃣ enviar rol
+    // 1 enviar rol
     const char *role = "ROLE: SUB\n";
     if (send(fd, role, strlen(role), 0) < 0) die("send role");
 
-    // 2️⃣ enviar suscripción
+    // 2 enviar suscripción
     char line[256];
     snprintf(line, sizeof(line), "SUB: %s\n", topic);
     if (send(fd, line, strlen(line), 0) < 0) die("send sub");
     printf("[SUB] Enviada suscripción a \"%s\"\n", topic);
 
-    // 3️⃣ escuchar mensajes del broker
+    // 3 escuchar mensajes del broker
     char buf[1024];
     for (;;) {
         ssize_t n = recv(fd, buf, sizeof(buf)-1, 0);
