@@ -165,33 +165,32 @@ En Wireshark, selecciona la interfaz lo (loopback) y aplica el filtro:
 
 <img width="196" height="42" alt="image" src="https://github.com/user-attachments/assets/5e1afe89-d587-469c-9658-ec7dbf04e395" />
 
-Al iniciar el broker y los clientes, se observarán directamente los datagramas UDP, sin el clásico handshake de TCP.
+Al iniciar el broker, los subscribers y los publishers, se observan directamente los datagramas UDP circulando entre las direcciones 127.0.0.1.
+A diferencia de TCP, no aparece el handshake (SYN, ACK), ya que UDP es un protocolo no orientado a conexión.
 
-2. Suscripción (SUB:)
+2. Broker UDP en escucha + suscripciones
 
-El subscriber envía un único datagrama con:
+<img width="828" height="146" alt="image" src="https://github.com/user-attachments/assets/044f3b42-82d5-4218-a7e9-884612304d92" />
 
-<img width="689" height="74" alt="image" src="https://github.com/user-attachments/assets/a3f4c224-f4ab-41f6-9d7d-12b8269a8e97" />
+El broker UDP queda a la espera en el puerto 5001. A medida que llegan los SUB:<topic>, registra las suscripciones por tema. No hay handshake ni conexiones persistentes (a diferencia de TCP), solo recepción de datagramas.
 
-En Wireshark se verá un solo paquete que viaja desde el SUB hacia el broker.
+3. Publisher UDP — comando de ejecución
 
-El broker imprime en consola:
+<img width="1155" height="136" alt="image" src="https://github.com/user-attachments/assets/2ba9322a-fc63-4c04-97c2-7c30e10017eb" />
 
-<img width="703" height="93" alt="image" src="https://github.com/user-attachments/assets/5fddebe2-edd8-41a2-b210-0530025d9e9e" />
+Ejecución del publisher_udp para el ejemplo tema Real_Azul_vs_Atletico_Rojo. Los eventos se envían como datagramas independientes con formato PUB:<topic>|<mensaje> cada ~150 ms por “minuto” simulado
 
-3. Publicación y replicación
+4. Subscriber UDP — Partido 1: Real_Azul_vs_Atletico_Rojo
 
-Cuando el publisher envía:
+<img width="1163" height="370" alt="image" src="https://github.com/user-attachments/assets/1f8fb8de-9719-4095-bf89-e71d653f33e5" />
 
-<img width="576" height="50" alt="image" src="https://github.com/user-attachments/assets/8b9931ac-f1f6-480b-9ac2-627dcb9931e2" />
+El subscriber_udp se suscribe con SUB:<topic> y luego recibe MSG:<topic>|... reenviados por el broker. En UDP no hay ACKs ni orden garantizado: cada mensaje es un datagrama independiente
 
-El broker genera:
+5. Subscriber UDP — Partido 2: Verde_CF_vs_Universidad_FC
 
-<img width="475" height="42" alt="image" src="https://github.com/user-attachments/assets/413beccb-e2cf-44e8-83bf-0ccad4b89583" />
+<img width="993" height="257" alt="image" src="https://github.com/user-attachments/assets/10f45b96-5302-4a02-a527-ee1a8d3f7a0b" />
 
-y lo reenvía a todos los suscriptores del mismo tema.
-
-En Wireshark se ven los datagramas PUB entrando al broker y los MSG saliendo hacia cada SUB, evidenciando el proceso de fan-out.
+Segundo suscriptor en paralelo, siguiendo otro partido. El broker hace fan-out y reenvía a cada suscriptor los eventos del tópico correspondiente.
 
 
 ### Conclusión general
